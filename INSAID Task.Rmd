@@ -1,0 +1,323 @@
+---
+title: "INSAID Task"
+author: "unknownda"
+date: "2022-10-07"
+output: pdf_document
+---
+
+## Setting up the data frame 
+
+Installing and loading *readr*, *dplyr*, *readxl*, *caTools*, *ggplot2*, *car*, *caret*, *pROC* and *fastDummies* packages. Then import the weather data from the *Fraud.csv* file.
+
+The data for the task is available in CSV format having 6362620 rows and 10 columns.
+
+The objective is to develop a model for predicting fraudulent transactions for a financial company and use insights from the model to develop an actionable plan.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Loading packages
+
+library(readr)
+library(dplyr)
+library(caTools)
+library(car)
+library(ggplot2)
+library(caret)
+library(pROC)
+library(fastDummies)
+
+# Reading the Input file
+
+df <- read_csv("Fraud.csv")
+```
+
+## Analyzing Input Data
+
+```{r echo=FALSE}
+
+str(df)
+summary(df)
+
+```
+
+The data set contains no missing values. Since no data is present for merchants, hence filtering them out.
+
+```{r echo=FALSE}
+
+df <- df[substr(df$nameDest,1,1)!='M',]
+
+```
+
+* We realize that the old and new balances are not meaningful for the task at hand, rather the change in balance is more important.
+* This will also remove possible multi-collinearity.
+* Thus creating two new fields that reflect the change in balance in Original and Destination accounts.
+
+```{r echo=FALSE}
+
+df <- df %>% mutate(origChange=oldbalanceOrg-newbalanceOrig, destChange= oldbalanceDest-newbalanceDest)
+
+```
+
+The **Box Plots** are displayed next.
+
+```{r echo=FALSE}
+
+ggplot(df, aes(x=as.factor(isFraud), y=step)) +
+  geom_boxplot() +
+  labs(title = "Distribution of step by isFraud ")
+
+
+ggplot(df, aes(x=as.factor(isFraud), y=amount)) +
+  geom_boxplot() +
+  labs(title = "Distribution of amount by isFraud")
+
+ggplot(df, aes(x=as.factor(isFraud), y=origChange)) +
+  geom_boxplot() +
+  labs(title = "Distribution of origChange(Change in Origin balance) by isFraud")
+
+```
+
+* No fraud for origChange < 0.
+* Checking the same.
+
+```{r echo=FALSE}
+
+F<- df[df$isFraud==1,]
+summary(F$origChange)
+
+```
+
+Minimum value of origChange is 0, hence True.
+
+```{r echo=FALSE}
+
+ggplot(df, aes(x=as.factor(isFraud), y=destChange)) +
+  geom_boxplot() +
+  labs(title = "Distribution of destChange(Change in Destinatiion balance) \nby isFraud")
+
+```
+
+* No fraud for destChange > 0.
+* Checking the same.
+
+```{r echo=FALSE}
+
+summary(F$destChange)
+
+```
+
+Maximum value is 315226, considering this point as Outlier.
+
+Filtering out origChange < 0 & destChange > 0.
+
+```{r echo=FALSE}
+
+df <- df[df$origChange>0,]
+
+df <- df[df$destChange<0,]
+
+summary(df)
+
+table(df$isFraud, df$isFlaggedFraud)
+
+```
+
+No isFlaggedFraud = 1, hence this variable is insignificant.
+
+```{r echo=FALSE}
+
+df$type <- as.factor(df$type)
+
+```
+
+## Dummy Variable creation
+
+```{r echo=FALSE}
+
+df_dummy <- dummy_cols(df, select_columns='type') 
+summary(df_dummy)
+str(df_dummy)
+
+```
+
+* Removing type as it is redundant.
+* Removing nameOrig & nameDest.
+* Removing old & new balances as their change has been recorded.
+* Removing type_TRANSFER AS type_TRANSFER=1 means type_CASH_OUT=type_DEBIT=0
+
+```{r echo=FALSE}
+
+df_dummy <- df_dummy[,-c(2,4:9)]
+
+df_dummy <- df_dummy[,-9]
+str(df_dummy)
+summary(df_dummy)
+
+```
+
+## Training & Test Set
+
+```{r echo=TRUE, results='hide'}
+
+# Splitting into Training & Test data
+
+set.seed(0)
+split <- sample.split(df$nameOrig, SplitRatio = 0.8)
+training_set <- subset(df_dummy, split==TRUE)
+test_set <- subset(df_dummy, split==FALSE)
+
+```
+
+## Logistic Regression model
+
+Including all variables except isFlaggedFraud.
+
+```{r echo=FALSE}
+
+lr_model <- glm(isFraud~.-isFlaggedFraud, data=training_set, family = binomial)
+summary(lr_model)
+
+lr_model_prob <- predict(lr_model, test_set, type="response")
+
+lr_model_pred <- rep(0, 293905)
+
+lr_model_pred[lr_model_prob>0.001] <- 1 
+
+```
+
+Threshold probability is taken as 0.001 so as to achieve maximum Specificity.
+
+```{r echo=FALSE}
+
+confusionMatrix(as.factor(lr_model_pred), as.factor(test_set$isFraud))
+
+roc_1 <- roc(test_set$isFraud, lr_model_pred)
+test1 <- roc_1$sensitivities
+test2 <- roc_1$specificities
+
+vif(lr_model)
+
+```
+
+* VIF of amount & origChange is very high, hence dropping amount.
+* Dropping type_DEBIT as it is not significant.
+
+```{r echo=FALSE}
+
+lr_model2 <- glm(isFraud~step+origChange+destChange+type_CASH_OUT , data=training_set, family = binomial)
+summary(lr_model2)
+
+lr_model2_prob <- predict(lr_model2, test_set, type="response")
+
+lr_model2_pred <- rep(0, 293905)
+
+lr_model2_pred[lr_model2_prob>0.001] <- 1 
+
+confusionMatrix(as.factor(lr_model2_pred), as.factor(test_set$isFraud))
+
+roc_2 <- roc(test_set$isFraud, lr_model2_pred)
+test3 <- roc_2$sensitivities
+test4 <- roc_2$specificities
+
+vif(lr_model2)
+
+```
+
+All VIF within acceptable range but original model is better Predictor.
+
+```{r echo=FALSE}
+
+ggplot() + 
+  geom_line(aes(x=test2, y=test1), color="blue") + 
+  geom_line(aes(x=test4, y=test3), color="red") +
+  labs(title = "ROC curve for the two models") +
+  xlab("Specificity") +
+  ylab("Sensitivity")
+
+```
+
+Hence Model 1 is better.
+
+## Insights
+
+The key fields that predict fraudulent customer are:
+* step 
+* amount
+* oldbalanceOrg - newbalanceOrig
+* oldbalanceDest - newbalanceDest
+* Weather the type is CASH OUT or not.
+
+The step field does not make sense as fraudulent transactions can happen at any time and step is a measure of time. All other key fields make sense because these are really the parameters that should indicate a fraud.
+
+## Recommendations
+
+Changes that can be made in the infrastructure:
+* The company should record the time based change in the balances rather than actual balances. 
+* The company's data collection policy should automatically exclude records where the Origin Balance is increasing wrt time or the Destination Balance is decreasing wrt time.
+
+These changes should save time, effort & memory and this will be reflected by reduced cost.
+
+## Brain-Wave
+
+Let us explore the amount, origChange & destChange fields of all fraudulent records.
+
+```{r echo=FALSE}
+
+str(F)
+
+```
+
+We realize that a lot of fraudulent transactions have the same amount and origChange, so we act accordingly.
+
+```{r echo=FALSE}
+
+df_bw <- df_dummy
+logical <- (df_bw$amount - df_bw$origChange)==0
+df_bw$isFlaggedFraud[logical]=1
+summary(df_bw)
+
+training_set_bw <- subset(df_bw, split==TRUE)
+test_set_bw <- subset(df_bw, split==FALSE)
+
+lr_model_bw <- glm(isFraud~., data=training_set_bw, family = binomial)
+summary(lr_model_bw)
+
+lr_model_bw_prob <- predict(lr_model_bw, test_set_bw, type="response")
+
+lr_model_bw_pred <- rep(0, 293905)
+
+lr_model_bw_pred[lr_model_bw_prob>0.001] <- 1 
+
+confusionMatrix(as.factor(lr_model_bw_pred), as.factor(test_set_bw$isFraud))
+
+vif(lr_model_bw)
+
+```
+
+* Dropping amount as it has high VIF & is also insignificant.
+* Dropping type_DEBIT as it is insignificant.
+
+```{r echo=FALSE}
+
+lr_model_bw2 <- glm(isFraud~. - amount - type_DEBIT, data=training_set_bw, family = binomial)
+summary(lr_model_bw2)
+
+lr_model_bw2_prob <- predict(lr_model_bw2, test_set_bw, type="response")
+
+lr_model_bw2_pred <- rep(0, 293905)
+
+lr_model_bw2_pred[lr_model_bw2_prob>0.001] <- 1 
+
+confusionMatrix(as.factor(lr_model_bw2_pred), as.factor(test_set_bw$isFraud))
+
+vif(lr_model_bw2)
+
+```
+
+* All VIF are within control
+* So an important change in the company's infrastructure can be the criteria for isFlaggedFraud
+* We can set isFlaggedFraud to 1 if (amount - (oldbalanceOrg - newbalanceOrig)) = 0
+* This makes the isFlaggedFraud field significant and also increases the model accuracy and specificity.
+
+This is the best model.
